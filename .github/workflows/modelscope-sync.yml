@@ -1,0 +1,79 @@
+name: ModelScope auto-sync (upstream -> fork -> Studio)
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"  # weekly, Monday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Check only (no push, no deploy)"
+        required: false
+        default: "true"
+
+permissions:
+  contents: write
+  issues: write
+
+env:
+  UPSTREAM_URL: https://github.com/decolua/9router.git
+  STUDIO_GIT: https://oauth2:${{ secrets.MS_STUDIO_TOKEN }}@www.modelscope.ai/studios/magoco/9router.git
+  STUDIO_API: https://www.modelscope.ai/openapi/v1/studios/magoco/9router
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream
+        id: merge
+        run: |
+          set -e
+          git config user.name "ms-sync-bot"
+          git config user.email "ms-sync-bot@local"
+          git remote add upstream "$UPSTREAM_URL" 2>/dev/null || true
+          git fetch upstream master
+          BEFORE=$(git rev-parse HEAD)
+          echo "before=$BEFORE" >> "$GITHUB_OUTPUT"
+          if git merge --no-edit upstream/master; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+            echo "CONFLICT"
+          fi
+          echo "after=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ "$(git rev-parse HEAD)" = "$BEFORE" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open issue on conflict
+        if: steps.merge.outputs.merged == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner, repo: context.repo.repo,
+              title: 'Upstream merge conflict - manual review needed',
+              body: 'Auto-merge from decolua/9router failed with conflicts. Studio stays on the last good version. Please resolve manually, then re-run this workflow.',
+            });
+
+      - name: Push to fork
+        if: steps.merge.outputs.merged == 'true' && steps.merge.outputs.changed == 'true' && inputs.dry_run != 'true'
+        run: git push origin master
+
+      - name: Push to Studio + deploy
+        if: steps.merge.outputs.merged == 'true' && steps.merge.outputs.changed == 'true' && inputs.dry_run != 'true'
+        run: |
+          set -e
+          git remote add modelscope "$STUDIO_GIT" 2>/dev/null || true
+          git fetch modelscope master || true
+          git merge --allow-unrelated-histories --no-edit modelscope/master -X ours || { git checkout --ours -- .; git add -A; git commit -m "Sync upstream (keep latest)"; }
+          git push modelscope master
+          curl -s -X POST "$STUDIO_API/deploy" -H "Authorization: Bearer ${{ secrets.MS_STUDIO_TOKEN }}" | head -c 300
+          echo
