@@ -72,8 +72,10 @@ jobs:
         run: |
           set -e
           git remote add modelscope "$STUDIO_GIT" 2>/dev/null || true
-          git fetch modelscope master || true
-          git merge --allow-unrelated-histories --no-edit modelscope/master -X ours || { git checkout --ours -- .; git add -A; git commit -m "Sync upstream (keep latest)"; }
+          git fetch modelscope master
+          # Fork already contains everything the Studio has (same patches, newer
+          # upstream). A clean merge is expected; on ANY conflict abort safely.
+          git merge --no-edit modelscope/master || { echo "STUDIO-CONFLICT"; exit 3; }
           git push modelscope master
           curl -s -X POST "$STUDIO_API/deploy" -H "Authorization: Bearer ${{ secrets.MS_STUDIO_TOKEN }}" | head -c 300
           echo
